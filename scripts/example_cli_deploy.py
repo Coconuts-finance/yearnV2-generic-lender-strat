@@ -13,7 +13,32 @@
 # brownie console --network=matic-mainnet-3
 
 
+from urllib.request import urlopen as req
+import json
 
+def getPrice(coin):
+  url = "https://api.coingecko.com/api/v3/simple/price?ids=%s&vs_currencies=usd" % coin
+  with req(url) as f:
+    resp = json.load(f)
+  return resp[coin]['usd']
+
+def getLimitInTokens(limit, coin):
+  price = getPrice(coin)
+  return limit / price
+
+def genLimits(muls):
+  onem = 1_000_000
+  limits = onem 
+  limits = {
+    # no change for stables
+    'usdc': onem * muls['usdc'],
+    'dai': onem * muls['dai'],
+    'usdt': onem * muls['usdt'],
+    'weth': getLimitInTokens(onem, 'ethereum') * muls['weth'],
+    'wbtc': getLimitInTokens(onem, 'bitcoin') * muls['wbtc'],
+    'wmatic': getLimitInTokens(onem, 'matic-network') * muls['wmatic'],
+  }
+  return limits
 
 acct = accounts.load('cocodeployer')
 
@@ -31,6 +56,8 @@ usdt = '0xc2132d05d31c914a87c6611c10748aeb04b58e8f'
 
 icmatic = '0xca0f37f73174a28a64552d426590d3ed601ecca1'
 
+matic_quickswap_router = '0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff'
+
 
 
 # DEFAULTS WE HAVE DEPLOYED
@@ -41,6 +68,8 @@ lender = GenericAaveMatic.at('0x8359C2aF49d654E30Cfe373a3D322440D5dACE67')
 multisig = '0x28973e7886e07CCD8e7eD95671CE7FAFeEb5157d'
 gelato_keepers = '0x527a819db1eb0e34426297b03bae11F2f8B3A19E'
 stratFacade = '0xB31929bEC89Ba33A977147e223020Dd4b3b821e1'
+
+
 
 governance = acct.address # launch vaults with self as gov for easy setup then convert ^
 gaurdian = acct.address
@@ -58,9 +87,12 @@ limit_muls = {
   'usdc': 1e6,
   'usdt': 1e6,
   'dai': 1e18,
-  'weth': 0.00025*1e18,
-  'wbtc': (1/60000)*1e8,
-  'wmatic': (1/1.5)*1e18
+  # 'weth': 0.00025*1e18,
+  # 'wbtc': (1/60000)*1e8,
+  # 'wmatic': (1/1.5)*1e18
+  'weth': 1e18,
+  'wbtc': 1e8,
+  'wmatic': 1e18
 }
 intokens = {
   'usdc': usdc,
@@ -71,7 +103,7 @@ intokens = {
   'weth': weth
 }
 
-
+limits = genLimits(limit_muls)
 
 
 
@@ -92,7 +124,7 @@ def deployVault(name):
 def postDeploy(name):
   # We petrify the vault a bit but changing it to owned by gov/multisig
   vault = res_vaults[name]
-  vault.setDepositLimit(one_mill * limit_muls[name], opts)
+  vault.setDepositLimit(limits[name], opts)
   vault.setManagementFee(vaultMgmtFee, opts)
   vault.setManagement(multisig, opts)
   linkedStrat = res_strats[name]
@@ -104,22 +136,51 @@ def cloneGLYO(name):
   thisGLYO = MaticStrategy.at(txn_receipt.events["Cloned"]["clone"])
   res_strats[name] = thisGLYO
 
-def cloneLender():
-  # TODO
+def cloneLender(name):
+  strat = res_strats[name]
+  lenderName = 'AAVELender-%s' % name
+  txn_receipt = lender.cloneAaveLender(strat, name, _isIncentivized)
+  thisLender = GenericAaveMultichain.at(txn_receipt.events["Cloned"]["clone"])
+  res_lenders[name] = thisLender
 
 
 # example deploy
-deployVault
-cloneGLYO
-cloneLender
-postDeploy
+# 1. Clone a vault with your token
+# 2. Clone GenericLenderYieldOptimizer - this is the strat that deploys funds to lender contracts and optimizes
+# 3. Clone the AAVELender 
+# 4. Create dummy base contract if any of the above do not exist
+
+for name, _ in intokens.items():
+  deployVault(name)
+  cloneGLYO(name)
+  cloneLender(name)
+  postDeploy(name)
+
+print(res_vaults)
+print(res_strats)
+print(res_lenders)
+
 
 # TODO CLEAN UP
 def deployLender(name):
   strat = res_strats[name]
-  name = '%s-AAVEMaticLender' % name
-  aToken = 
+  name = '%s-AAVELender' % name
+  _weth = wmatic
+  _rewardsTokenToSell = wmatic
+  _router = matic_quickswap_router
   isIncentivised = False
+  lender = GenericAaveMultichain.deploy(
+    strat,
+    name,
+    _weth,
+    _rewardsTokenToSell,
+    _router,
+    isIncentivised,
+    opts,
+    publish_source=True
+  )
+  return lender
+
 
 
 def deployGLYO(name):
